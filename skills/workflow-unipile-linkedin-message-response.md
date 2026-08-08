@@ -1,0 +1,159 @@
+# LinkedIn Message Unipile Auto-Response Workflow
+
+---
+name: workflow-unipile-linkedin-message-response
+description: "Process Unipile LinkedIn message webhooks, deduplicate replies, analyze follower count, draft non-commitment response, auto-reply via Unipile API, and send email notification."
+type: workflow
+execution: stateful
+inputs:
+  - name: webhook_payload
+    type: object
+    source: user
+    label: "Unipile Webhook Payload"
+    field: textarea
+    required: true
+    placeholder: '{"event": "message_received", "message_id": "msg_XXXXXXXX", "chat_id": "chat_XXXXXXXX", "account_id": "{{UNIPILE_ACCOUNT_ID}}", "sender": {"name": "Jane Doe", "profile_url": "https://linkedin.com/in/janedoe", "followers_count": 15400}, "message": "what time works best"}'
+    help: "Inbound JSON webhook payload from Unipile containing message_id, chat_id, account_id, message, and sender details"
+  - name: unipile_dsn
+    type: string
+    source: user
+    label: "Unipile DSN"
+    required: true
+    placeholder: "apiXX.unipile.com:PORT"
+    help: "Unipile API server host and port (from your Unipile dashboard)"
+  - name: unipile_api_key
+    type: string
+    source: secret
+    label: "Unipile API Key"
+    required: true
+    help: "Unipile X-API-KEY. Store as a secret / environment variable (UNIPILE_API_KEY) — never hardcode in this skill."
+  - name: unipile_account_id
+    type: string
+    source: user
+    label: "Unipile Account ID"
+    required: true
+    placeholder: "acct_XXXXXXXX"
+    help: "The Unipile account ID of the LinkedIn account this workflow monitors"
+  - name: recipient_email
+    type: string
+    source: user
+    label: "Notification Recipient Email"
+    field: email
+    required: true
+    placeholder: "user@example.com"
+    help: "Email address where the confirmation, auto-sent reply, follower count, and thread link will be sent"
+---
+
+## Workflow
+
+```mermaid
+flowchart TD
+  Input["Input"]:::dvTodo
+  A["1. Receive & Parse Unipile Webhook"]:::dvTodo
+  subgraph rowB [ ]
+    direction TB
+    B["2. Check Reply Status & Deduplicate"]:::dvTodo
+    noteB["Terminated: self-sent message (is_sender: true)"]:::dvNote
+  end
+  C["3. Analyze Message, Profile & Follower Count"]:::dvTodo
+  D["4. Draft Response (No Scheduling/Times)"]:::dvTodo
+  E["5. Post Reply into Existing Chat Thread"]:::dvTodo
+  F["6. Send Confirmation Email & Notify"]:::dvTodo
+  Output["Output"]:::dvTodo
+  Input e0@--> A
+  A e1@--> B
+  B e2@--> C
+  C e3@--> D
+  D e4@--> E
+  E e5@--> F
+  F e6@--> Output
+  e0@{ animation: slow }
+  e1@{ animation: slow }
+  e2@{ animation: slow }
+  e3@{ animation: slow }
+  e4@{ animation: slow }
+  e5@{ animation: slow }
+  e6@{ animation: slow }
+```
+
+## Node Description
+
+<accordion-plain>
+1. Receive & Parse Unipile Webhook
+
+*Estimated time: ~1 min (from 1 run)*
+
+1. Intercept inbound webhook payload triggered by Unipile on a new LinkedIn message targeting account `{{unipile_account_id}}`.
+2. Extract required identifiers: `message_id`, `chat_id` (existing Unipile conversation ID), `account_id`, sender name, LinkedIn profile URL, message text, thread URL, and follower count.
+3. Validate presence of `message_id` and `chat_id`.
+</accordion-plain>
+
+<accordion-plain>
+2. Check Reply Status & Deduplicate
+
+*Estimated time: ~1 min (from 5 runs)*
+
+1. Query VistaBase (`database_search` / `search_context_cards`) for existing cards matching `message_id` or `chat_id`.
+2. Check if a reply has already been generated or sent for this specific message or thread state.
+3. **If already replied or self-sent message**: Terminate workflow execution immediately without drafting or posting a new message to prevent duplicate replies.
+</accordion-plain>
+
+<accordion-plain>
+3. Analyze Message, Profile & Follower Count
+
+*Estimated time: ~1 min (from 3 runs)*
+
+1. Retrieve sender profile metadata to confirm LinkedIn follower count.
+2. Search VistaBase (`database_search` / `search_context_cards`) for existing `person` or `organization` context.
+3. Determine intent, core questions, and priority tier (e.g. High Priority: >10k followers).
+</accordion-plain>
+
+<accordion-plain>
+4. Draft Response (No Scheduling/Times)
+
+*Estimated time: ~1 min (from 3 runs)*
+
+1. Synthesize a polite, engaging, and professional response aligned with founder tone.
+2. **Strict Guardrails & Zero Commitments**:
+   - **No Promises of Meetings**: Do NOT promise a meeting, call, coffee chat, or follow-up conversation.
+   - **No Promises of Collaboration**: Do NOT promise partnerships, joint projects, advisory roles, or investments.
+   - **No Scheduling/Times**: Do NOT offer specific times, suggest scheduling slots, propose PST/EST hours, or share calendar links.
+3. Focus purely on acknowledging the message politely, expressing appreciation, or acknowledging key points without making commitments.
+4. Construct request payload for Unipile's send-message endpoint (`POST https://{{unipile_dsn}}/api/v1/chats/{chat_id}/messages`).
+</accordion-plain>
+
+<accordion-plain>
+5. Post Reply into Existing Chat Thread
+
+*Estimated time: ~1 min (from 2 runs)*
+
+1. Execute POST request targeting the existing chat thread endpoint:
+
+```yaml
+prompt: |
+  curl --request POST \
+       --url https://{{unipile_dsn}}/api/v1/chats/{{chat_id}}/messages \
+       --header "X-API-KEY: $UNIPILE_API_KEY" \
+       --header 'accept: application/json' \
+       --header 'content-type: multipart/form-data' \
+       --form 'text={{generated_reply}}'
+```
+
+2. Confirm Unipile API response status (HTTP 200/201) and capture returned message ID.
+</accordion-plain>
+
+<accordion-plain>
+6. Send Confirmation Email & Notify
+
+*Estimated time: ~1 min (from 3 runs)*
+
+1. Format notification email summarizing:
+   - **Sender**: Name, LinkedIn profile link, and **Follower Count**
+   - **Thread & Message ID**: `chat_id` / `message_id`
+   - **Status**: Auto-replied directly into existing LinkedIn thread
+   - **Received Message**: Full text of incoming message
+   - **Sent Auto-Reply**: Exact text delivered to LinkedIn
+   - **LinkedIn Thread Link**: Direct link for manual review or follow-up
+2. Deliver email to `recipient_email` via `send_email` or `send_notification_email`.
+3. Persist a `message` card in VistaBase tagged with `message_id` and `chat_id` to block duplicate future triggers.
+</accordion-plain>

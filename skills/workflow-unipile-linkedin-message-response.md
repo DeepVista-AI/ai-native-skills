@@ -18,22 +18,22 @@ inputs:
     type: string
     source: user
     label: "Unipile DSN"
-    required: true
+    required: false
     placeholder: "apiXX.unipile.com:PORT"
-    help: "Unipile API server host and port (from your Unipile dashboard)"
+    help: "Unipile API server host and port (from your Unipile dashboard). Only needed for the direct-API fallback; not required when using the DeepVista MCP send_linkedin_message tool."
   - name: unipile_api_key
     type: string
     source: secret
     label: "Unipile API Key"
-    required: true
-    help: "Unipile X-API-KEY. Store as a secret / environment variable (UNIPILE_API_KEY) — never hardcode in this skill."
+    required: false
+    help: "Unipile X-API-KEY. Only needed for the direct-API fallback (DeepVista MCP handles credentials server-side). Store as a secret / environment variable (UNIPILE_API_KEY) — never hardcode in this skill."
   - name: unipile_account_id
     type: string
     source: user
     label: "Unipile Account ID"
-    required: true
+    required: false
     placeholder: "acct_XXXXXXXX"
-    help: "The Unipile account ID of the LinkedIn account this workflow monitors"
+    help: "The Unipile account ID of the LinkedIn account this workflow monitors. If unset, resolve it via DeepVista MCP: search context cards for 'LinkedIn account connected', or run the create_linkedin_auth_link setup flow (see Setup & Prerequisites)."
   - name: recipient_email
     type: string
     source: user
@@ -43,6 +43,47 @@ inputs:
     placeholder: "user@example.com"
     help: "Email address where the confirmation, auto-sent reply, follower count, and thread link will be sent"
 ---
+
+## Setup & Prerequisites (via DeepVista MCP)
+
+Before running the workflow, verify all requirements are satisfied. If anything is
+missing, use the DeepVista MCP tools to complete the setup **conversationally** —
+walk the user through it in chat rather than telling them to leave and configure
+things manually.
+
+### Requirement checklist
+
+| Requirement | How to check | How to fix via MCP |
+|---|---|---|
+| LinkedIn account connected to Unipile | `search_context_cards` for a card titled "LinkedIn account connected" (tags: `LinkedIn`, `Unipile`) containing `unipile_account_id` | Call `create_linkedin_auth_link` and guide the user through it (see below) |
+| `unipile_account_id` | Read it from the same context card | Filled automatically once the auth flow completes |
+| `unipile_dsn` / `unipile_api_key` | Only needed for the raw-curl path (Step 5 fallback); not needed when using MCP tools | Prefer the MCP `send_linkedin_message` tool, which handles credentials server-side — never ask the user to paste an API key into chat |
+| Notification email | Confirm `recipient_email` with the user | `send_notification_email` needs no setup; `send_email` requires the user's connected Gmail account |
+
+### Connecting LinkedIn through chat
+
+If no LinkedIn account is connected yet:
+
+1. Call the DeepVista MCP tool `create_linkedin_auth_link` (optionally passing a
+   `success_redirect_url`). It returns a Unipile **hosted auth URL**.
+2. Show the URL to the user and ask them to open it in a browser and sign in to
+   LinkedIn. The connection completes out-of-band — DeepVista is notified via the
+   `account.connected` webhook, which records the new `unipile_account_id` in a
+   context card ("LinkedIn account connected") tied to the user.
+3. After the user says they've finished, re-run `search_context_cards` for the
+   connection card to pick up `unipile_account_id`. If it hasn't appeared yet,
+   wait briefly and retry, or ask the user to confirm the browser flow succeeded.
+4. Never guess or fabricate an `account_id` — only use one recorded by the webhook
+   or explicitly provided by the user.
+
+### Preferred send path
+
+When the DeepVista MCP `send_linkedin_message` tool is available, use it instead of
+the raw Unipile curl in Step 5 — it sends from the user's connected account using
+server-side credentials (`account_id`, recipient provider id, message text) and
+returns `chat_id` / `message_id` for the notification step. Fall back to the direct
+Unipile API only when the MCP server is unavailable and the user has supplied
+`unipile_dsn` + `unipile_api_key` as secrets.
 
 ## Workflow
 
@@ -127,7 +168,8 @@ flowchart TD
 
 *Estimated time: ~1 min (from 2 runs)*
 
-1. Execute POST request targeting the existing chat thread endpoint:
+1. **Preferred**: call the DeepVista MCP tool `send_linkedin_message` with the connected `account_id`, the recipient's provider id, and the drafted text — it returns `chat_id` / `message_id` on success. If no account is connected, run the `create_linkedin_auth_link` setup flow first (see Setup & Prerequisites).
+2. **Fallback** (only if the MCP server is unavailable and `unipile_dsn` + `unipile_api_key` are provided): execute a POST request targeting the existing chat thread endpoint:
 
 ```yaml
 prompt: |
@@ -139,7 +181,7 @@ prompt: |
        --form 'text={{generated_reply}}'
 ```
 
-2. Confirm Unipile API response status (HTTP 200/201) and capture returned message ID.
+3. Confirm success (MCP `status: "sent"` or HTTP 200/201) and capture the returned message ID.
 </accordion-plain>
 
 <accordion-plain>

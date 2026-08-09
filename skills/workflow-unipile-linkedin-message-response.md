@@ -60,6 +60,52 @@ things manually.
 | `unipile_dsn` / `unipile_api_key` | Only needed for the raw-curl path (Step 5 fallback); not needed when using MCP tools | Prefer the MCP `send_linkedin_message` tool, which handles credentials server-side — never ask the user to paste an API key into chat |
 | Notification email | Confirm `recipient_email` with the user | `send_notification_email` needs no setup; `send_email` requires the user's connected Gmail account |
 
+### Setup tools reference
+
+The following MCP tools are available for setup. Use them conversationally — walk
+the user through setup in chat rather than telling them to leave and configure
+things manually.
+
+#### Connecting a LinkedIn account
+
+| Tool | Purpose | Key notes |
+|---|---|---|
+| `create_linkedin_auth_link` | Returns a Unipile hosted auth URL for the user to open in their browser | Pass an optional `success_redirect_url`; connection completes out-of-band — do not poll |
+| `search_context_cards` | Look up the stored `unipile_account_id` after the user completes the auth flow | Search for tag `LinkedIn` / `Unipile`; the card title is "LinkedIn account connected" |
+
+- Never ask the user for their `account_id` directly — look it up from a context
+  card or memory first. It is recorded automatically by the `account.connected`
+  webhook once the browser flow completes.
+- Never guess or fabricate an `account_id`.
+
+#### Wiring the webhook to receive LinkedIn messages
+
+| Tool | Purpose | Key notes |
+|---|---|---|
+| `manage_skill_webhook(action="enable")` | Returns the callback URL for this workflow | Always call this **first**, before registering with any external provider |
+| `create_unipile_webhook` | Registers the callback URL with Unipile so DMs are forwarded here | Pass `source="messaging"` and `events=["message_received"]`; idempotent — safe to call again with the same URL |
+
+- Do not call `manage_skill_webhook(action="regenerate")` unless the user
+  explicitly wants to invalidate the old URL — anything already registered with it
+  will stop working.
+
+#### Sending messages
+
+| Tool | Purpose | Key notes |
+|---|---|---|
+| `send_linkedin_message` | Sends a reply from the user's connected LinkedIn account | Requires a connected `account_id`; if none exists, run `create_linkedin_auth_link` first |
+
+- The `recipient_provider_id` is Unipile's internal attendee ID, **not** a
+  LinkedIn profile URL — it must come from a Unipile API response, not user input.
+
+#### Credentials
+
+Both Unipile tools (`send_linkedin_message`, `create_unipile_webhook`) require
+`UNIPILE_API_KEY` and `UNIPILE_DSN` to be set as environment-variable cards on
+the project. If a tool errors, surface a setup instruction to the user rather than
+retrying. Tool failures raise `ToolError` with a human-readable message — relay it
+to the user as-is.
+
 ### Connecting LinkedIn through chat
 
 If no LinkedIn account is connected yet:
@@ -75,6 +121,17 @@ If no LinkedIn account is connected yet:
    wait briefly and retry, or ask the user to confirm the browser flow succeeded.
 4. Never guess or fabricate an `account_id` — only use one recorded by the webhook
    or explicitly provided by the user.
+
+## State Synchronization Invariant
+
+> **State Synchronization**: Every phase transition or early termination condition
+> MUST invoke `update_workflow_phase` before exiting or pausing execution. No inline
+> short-circuit may exit without updating the card state. If the agent decides to
+> halt inside any phase (dedup hit, guardrail, validation failure), it must first:
+> 1. Call `update_workflow_phase(action="done", phase_label="<current phase>")` so the
+>    run dot moves to — and stops on — the phase where execution ended, and
+> 2. Update the run status / append a `## Log` entry describing why execution halted,
+>    before finalizing the run.
 
 ### Preferred send path
 
@@ -127,6 +184,7 @@ flowchart TD
 1. Intercept inbound webhook payload triggered by Unipile on a new LinkedIn message targeting account `{{unipile_account_id}}`.
 2. Extract required identifiers: `message_id`, `chat_id` (existing Unipile conversation ID), `account_id`, sender name, LinkedIn profile URL, message text, thread URL, and follower count.
 3. Validate presence of `message_id` and `chat_id`.
+4. Upon valid parsing of the payload, call `update_workflow_phase(action="done", phase_label="1. Receive & Parse Unipile Webhook", next_phase="2. Check Reply Status & Deduplicate")` to advance the visual run dot to Phase 2 **before** processing deduplication rules.
 </accordion-plain>
 
 <accordion-plain>
@@ -136,7 +194,10 @@ flowchart TD
 
 1. Query VistaBase (`database_search` / `search_context_cards`) for existing cards matching `message_id` or `chat_id`.
 2. Check if a reply has already been generated or sent for this specific message or thread state.
-3. **If already replied or self-sent message**: Terminate workflow execution immediately without drafting or posting a new message to prevent duplicate replies.
+3. **If already replied or self-sent message (`is_sender: true`)**: do NOT draft or post a new message. Before terminating, you MUST synchronize card state:
+   1. Call `update_workflow_phase(action="done", phase_label="2. Check Reply Status & Deduplicate", note_text="🛑 Halted: Duplicate message detected")` so the run dot moves to this phase and shows it as completed/halted.
+   2. Append an entry to `## Log` detailing the short-circuit reason (e.g. `Duplicate detected for chat_id: <chat_id>`), and update the run status to reflect the halt.
+   3. Only then finalize/terminate the run — the visual dot must remain on Phase 2, never stuck on Phase 1.
 </accordion-plain>
 
 <accordion-plain>
